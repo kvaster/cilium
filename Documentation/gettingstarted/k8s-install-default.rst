@@ -63,45 +63,35 @@ to create a Kubernetes cluster locally or using a managed Kubernetes service:
            export AZURE_RESOURCE_GROUP="aks-cilium-group"
            az group create --name "${AZURE_RESOURCE_GROUP}" -l westus2
 
-           # Details: Basic load balancers are not supported with multiple node
-           # pools. Create a cluster with standard load balancer selected to use
-           # multiple node pools, learn more at aka.ms/aks/nodepools.
+           # Create AKS cluster with an initial node pool of 1 node (we will remove this
+           # node pool afterwards) and standard load balancer (allowing multiple node
+           # pools, see https://aka.ms/aks/nodepools)
            az aks create \
-           --resource-group "${AZURE_RESOURCE_GROUP}" \
-           --name "${NAME}" \
-           --network-plugin azure \
-           --load-balancer-sku standard
-
-           # Get the name of the node pool that was just created since it will
-           # be deleted after Cilium is installed.
-           nodepool_to_delete=$(az aks nodepool list --cluster-name "${NAME}" -g "${AZURE_RESOURCE_GROUP}" -o json | jq -r '.[0].name')
-
-           # Create a node pool with 'mode=system' as it is the same mode used
-           # for the default nodepool on cluster creation also this new node
-           # pool will have the taint 'node.cilium.io/agent-not-ready=true:NoSchedule'
-           # which will guarantee that pods will only be scheduled on that node
-           # once Cilium is ready.
-           az aks nodepool add \
-             --name "nodepool2" \
-             --cluster-name "${NAME}" \
              --resource-group "${AZURE_RESOURCE_GROUP}" \
-             --node-count 2 \
+             --name "${NAME}" \
+             --network-plugin azure \
+             --load-balancer-sku standard \
+             --node-count 1
+
+           # Get name of initial node pool (that we will delete afterwards)
+           nodepool_to_delete=$(az aks nodepool list --resource-group ${{ env.name }} --cluster-name ${{ env.name }} --output tsv --query "[0].name")
+
+           # Create system node pool tainted with `CriticalAddonsOnly=true:NoSchedule`
+           # This node pool will replace the initial AKS node pool and only host system
+           # pods due to the `CriticalAddonsOnly` taint. Replacement is necessary because
+           # it is not possible to assign taints to the initial AKS node pool at this time,
+           # cf. https://github.com/Azure/AKS/issues/1402
+           az aks nodepool add \
+             --resource-group "${AZURE_RESOURCE_GROUP}" \
+             --cluster-name "${NAME}" \
+             --name systempool \
              --mode system \
-             --node-taints node.cilium.io/agent-not-ready=true:NoSchedule
+             --node-count 1 \
+             --node-taints "CriticalAddonsOnly=true:NoSchedule" \
+             --no-wait
 
            # Get the credentials to access the cluster with kubectl
-           az aks get-credentials --name "${NAME}" --resource-group "${AZURE_RESOURCE_GROUP}"
-
-           # We can only delete the first node pool after Cilium is installed
-           # because some pods have Pod Disruption Budgets set. If we try to
-           # delete the first node pool without the second node pool being ready,
-           # AKS will not succeed with the pool deletion because some Deployments
-           # can't cease to exist in the cluster.
-           #
-           # NOTE: Only delete the nodepool after deploying Cilium
-           az aks nodepool delete --name ${nodepool_to_delete} \
-             --cluster-name "${NAME}" \
-             --resource-group "${AZURE_RESOURCE_GROUP}"
+           az aks get-credentials --resource-group "${AZURE_RESOURCE_GROUP}" --name "${NAME}"
 
        .. attention::
 
@@ -220,6 +210,37 @@ You can install Cilium on any Kubernetes cluster. Pick one of the options below:
        .. code-block:: shell-session
 
            cilium install --azure-resource-group "${AZURE_RESOURCE_GROUP}"
+
+       Do not forget to taint node pools with ``node.cilium.io/agent-not-ready=true:NoSchedule``
+       to ensure that applications pods will only be scheduled once Cilium is
+       ready to manage them.
+
+       If you followed the :ref:`Create the cluster` guide above, that would be:
+
+       .. code-block:: bash
+
+           # We can only delete the initial node pool after Cilium is installed because
+           # some pods have Pod Disruption Budgets set. If we try to delete the initial
+           # node pool without the second node pool being ready, pool deletion will not
+           # succeed because some Deployments can't cease to exist in the cluster.
+           az aks nodepool delete \
+             --resource-group "${AZURE_RESOURCE_GROUP}" \
+             --cluster-name "${NAME}" \
+             --name "${nodepool_to_delete}" \
+             --no-wait
+
+           # Create user node pool tainted with `node.cilium.io/agent-not-ready=true:NoSchedule`
+           # This node pool will be able to host application pods since it does not have
+           # the `CriticalAddonsOnly` taint. The taint `node.cilium.io/agent-not-ready`
+           # will ensure that applications pods will only be scheduled once Cilium is ready
+           # to manage them.
+           az aks nodepool add \
+             --resource-group "${AZURE_RESOURCE_GROUP}" \
+             --cluster-name "${NAME}" \
+             --name userpool \
+             --mode user \
+             --node-count 2 \
+             --node-taints "node.cilium.io/agent-not-ready=true:NoSchedule"
 
     .. group-tab:: AWS/EKS
 
